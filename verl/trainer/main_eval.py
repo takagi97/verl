@@ -22,13 +22,14 @@ from verl.utils.fs import copy_to_local
 from verl.utils.reward_score import math, gsm8k
 import pandas as pd
 import numpy as np
+from deepscaler.rewards.math_reward import deepscaler_reward_fn
 
 
 def select_reward_fn(data_source):
     if data_source == 'lighteval/MATH':
         return math.compute_score
     else:
-        raise NotImplementedError
+        raise deepscaler_reward_fn
 
 
 @hydra.main(config_path='config', config_name='evaluation', version_base=None)
@@ -43,7 +44,7 @@ def main(config):
     passes = 0
 
     total = len(dataset)
-
+    total_scores = []
     for i in range(total):
         response_lst = responses[i]
         data_source = data_sources[i]
@@ -56,13 +57,13 @@ def main(config):
         for r in response_lst:
             score = reward_fn(r, ground_truth)
             score_lst.append(score)
-
         max_score = np.max(score_lst)
-
+        total_scores.append(score_lst)
+        n_samples = len(response_lst)
         if max_score == 1:
             passes += 1
-
-    print(f'pass@5: {passes / total}')
+    print(f'Pass@1, Avg: {np.mean(total_scores)}')
+    print(f'Pass@{n_samples}: {passes / total}')
 
 
 if __name__ == '__main__':
