@@ -247,6 +247,31 @@ class DataProto:
             message = f'{prefix}, ' + message
         print(message)
 
+    def print_content(self):
+        # torch.set_printoptions(threshold=999999)
+        # bsz = train_batch_size * n
+        for key, tensor in self.batch.items():
+            print(key, tensor.size(), tensor)
+            # prompts: bsz * max_prompt_length (no matter the extract length)
+            # responses: bsz * max_response_length
+            # attention_mask: bsz * max_prompt_length+max_response_length
+            # input_ids: bsz * max_prompt_length+max_response_length
+            # position_ids: bsz * max_prompt_length+max_response_length
+            # old_log_probs: bsz * max_response_length
+            # ref_log_prob: bsz * max_response_length ref模型生成的概率，因此第一步的时候跟前一个相同
+
+        for key, numpy_array in self.non_tensor_batch.items():
+            print(key, numpy_array)
+            # data_source: [bsz * '']
+            # ability: [bsz * 'math']
+            # reward_model: [bsz * {'ground_truth': '\\frac{2}{7}', 'style': 'rule'}]
+            # extra_info: [bsz * {'index': 21340, 'split': 'train'}]
+            # index: [bsz * 21340]
+            # uid: [bsz * 'b82ff514-9c36-4680-91b1-33c527d10000']
+
+        print(self.meta_info)
+        # {'global_token_num': [240, 240, 174, 174, 206, 206, 276, 276], 'temperature': 0.6}
+
     def check_consistency(self):
         """Check the consistency of the DataProto. Mainly for batch and non_tensor_batch
         We expose this function as a public one so that user can call themselves directly

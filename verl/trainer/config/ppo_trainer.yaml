@@ -65,6 +65,7 @@ actor_rollout_ref:
   rollout:
     name: vllm
     temperature: 1.0
+    val_temperature: 0.6
     top_k: -1 # 0 for hf rollout, -1 for vllm rollout
     top_p: 1
     use_fire_sampling: False # https://arxiv.org/abs/2410.21236
@@ -91,6 +92,7 @@ actor_rollout_ref:
     do_sample: True
     # number of responses (i.e. num sample times)
     n: 1 # > 1 for grpo
+    n_val: 8
 
 critic:
   strategy: fsdp
@@ -146,7 +148,7 @@ reward_model:
   ulysses_sequence_parallel_size: 1 # sp size
   use_dynamic_bsz: ${critic.use_dynamic_bsz}
   forward_max_token_len_per_gpu: ${critic.forward_max_token_len_per_gpu}
-  reward_manager: naive
+  reward_manager: deepscaler
 
 custom_reward_function:
   path: null

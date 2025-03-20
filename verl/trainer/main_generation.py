@@ -14,10 +14,12 @@
 """
 Generate responses given a dataset of prompts
 """
+import csv
 import ray
 import numpy as np
 import hydra
 import os
+from tabulate import tabulate
 
 os.environ['NCCL_DEBUG'] = 'WARN'
 os.environ['TOKENIZERS_PARALLELISM'] = 'true'

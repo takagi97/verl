@@ -94,6 +94,7 @@ class vLLMRollout(BaseRollout):
                         else config.prompt_length + config.response_length
         max_model_len = int(max_model_len)
 
+        max_num_batched_tokens = max_model_len
         if max_num_batched_tokens < max_model_len and self.config.enable_chunked_prefill:
             raise ValueError('Enable chunked prefill, max_num_batched_tokens is smaller than max_model_len, \
                              please increase max_num_batched_tokens or disable chunked prefill')
@@ -184,9 +185,12 @@ class vLLMRollout(BaseRollout):
                 'temperature': 0,
                 'n': 1  # if greedy, only 1 response
             }
-
+        if prompts.meta_info.get('val_temperature', None):
+            kwargs['temperature'] = prompts.meta_info['val_temperature']
         # users can customize different sampling_params at different run
         with self.update_sampling_params(**kwargs):
+            print("Current vllm parameters", self.sampling_params)
+            # exit(0)
             output = self.inference_engine.generate(
                 prompts=None,  # because we have already convert it to prompt token id
                 sampling_params=self.sampling_params,

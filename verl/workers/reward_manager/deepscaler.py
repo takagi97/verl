@@ -20,7 +20,7 @@ class DeepScalerRewardManager():
         self.tokenizer = tokenizer
         self.num_examine = num_examine  # the number of batches of decoded responses to print to the console
 
-    def __call__(self, data: DataProto):
+    def __call__(self, data: DataProto, return_corr_list=False):
         """We will expand this function gradually based on the available datasets"""
 
         # If there is rm score, we directly return rm score. Otherwise, we compute via rm_score_fn
@@ -75,8 +75,13 @@ class DeepScalerRewardManager():
             results = list(executor.map(process_item, args))
 
         # Fill reward tensor with results
+        corr_list = []
         for i, score, valid_response_length in results:
             reward_tensor[i, valid_response_length - 1] = score
+            corr_list.append(score)
 
-        return reward_tensor
+        if return_corr_list:
+            return reward_tensor, corr_list
+        else:
+            return reward_tensor
 

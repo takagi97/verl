@@ -41,6 +41,7 @@ from verl.utils.dataset.rl_dataset import RLHFDataset, collate_fn
 from verl.utils.tracking import ValidationGenerationsLogger
 from torch.utils.data import RandomSampler, SequentialSampler
 from torchdata.stateful_dataloader import StatefulDataLoader
+import random
 
 WorkerType = Type[Worker]
 
@@ -645,6 +646,8 @@ class RayPPOTrainer(object):
             input_ids = test_batch.batch['input_ids']
             input_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in input_ids]
             sample_inputs.extend(input_texts)
+            n_val_samples = self.config.actor_rollout_ref.rollout.n_val
+            test_batch = test_batch.repeat(repeat_times=n_val_samples, interleave=True)
 
             if 'multi_modal_inputs' in test_batch.non_tensor_batch.keys():
                 test_gen_batch = test_batch.pop(
@@ -656,7 +659,7 @@ class RayPPOTrainer(object):
                     batch_keys=['input_ids', 'attention_mask', 'position_ids'],
                     non_tensor_batch_keys=['raw_prompt_ids'],
                 )
-
+            # 哪有这么sb的设计？？？？？？？？？？？？？？
             test_gen_batch.meta_info = {
                 'eos_token_id': self.tokenizer.eos_token_id,
                 'pad_token_id': self.tokenizer.pad_token_id,
@@ -667,6 +670,7 @@ class RayPPOTrainer(object):
 
             # pad to be divisible by dp_size
             test_gen_batch_padded, pad_size = pad_dataproto_to_divisor(test_gen_batch, self.actor_rollout_wg.world_size)
+            test_gen_batch_padded.meta_info['val_temperature'] = self.config.actor_rollout_ref.rollout.val_temperature
             test_output_gen_batch_padded = self.actor_rollout_wg.generate_sequences(test_gen_batch_padded)
             # unpad
             test_output_gen_batch = unpad_dataproto(test_output_gen_batch_padded, pad_size=pad_size)
@@ -878,6 +882,64 @@ class RayPPOTrainer(object):
                                                     prefix=logging_prefix)
         metrics.update(global_balance_stats)
 
+    def _rm_neg_samples(self, batch: DataProto, corr_list, reserve_prob=0.8, threshold=0):
+        world_size = self.actor_rollout_wg.world_size
+        reserve_list = []
+        corr_count = 0
+        for if_corr in corr_list:
+            if if_corr:
+                reserve_list.append(True)
+                corr_count += 1
+                continue
+            num = random.uniform(0, 1)
+            if num < reserve_prob:
+                reserve_list.append(True)
+            else:
+                reserve_list.append(False)
+        print(f"Correctness count: {corr_count}")
+
+        def _ensure_true_threshold(mask, threshold):
+            """
+            统计 mask 中 True 的个数，如果小于 threshold，
+            则随机选择 False 的位置并设为 True，直到满足阈值。
+            
+            :param mask: List[bool] - 只包含 True 和 False 的列表
+            :param threshold: int - 需要的最小 True 个数
+            :return: List[bool] - 修改后的列表
+            """
+            false_indices = [i for i, val in enumerate(mask) if not val]
+            num_to_flip = threshold - true_count
+            indices_to_flip = random.sample(false_indices, num_to_flip)
+            for idx in indices_to_flip:
+                mask[idx] = True
+            return mask
+        
+        true_count = sum(reserve_list)
+        if true_count < threshold:
+            reserve_list = _ensure_true_threshold(reserve_list, threshold)
+        true_count = sum(reserve_list)
+        if true_count % world_size != 0: # 保证此时batch能够被卡数整除
+            reserve_list = _ensure_true_threshold(reserve_list, world_size*(true_count//world_size+1))
+        
+        dict_batch = {}
+        meta_info = {}
+        mask = torch.tensor(reserve_list, dtype=torch.bool)
+        for key, tensor in batch.batch.items():
+            dict_batch[key] = tensor[mask]
+        
+        mask = np.array(reserve_list, dtype=bool)
+        for key, numpy_array in batch.non_tensor_batch.items():
+            dict_batch[key] = numpy_array[mask]
+        
+        for key, value in batch.meta_info.items():
+            if isinstance(value, list):
+                meta_info[key] = [val for i, val in enumerate(value) if reserve_list[i]]
+            else:
+                meta_info[key] = value
+
+        processed_batch: DataProto = DataProto.from_single_dict(dict_batch, meta_info)
+        return processed_batch
+    
     def fit(self):
         """
         The training loop of PPO.
@@ -911,7 +973,7 @@ class RayPPOTrainer(object):
         last_val_metrics = None
 
         for epoch in range(self.config.trainer.total_epochs):
-            for batch_dict in self.train_dataloader:
+            for batch_dict in self.train_dataloader: # self.train_dataloader里面就是全部的训练数据40192条，无重复，跟n rollout无关
                 metrics = {}
                 timing_raw = {}
 
@@ -993,8 +1055,23 @@ class RayPPOTrainer(object):
                             batch = batch.union(reward_tensor)
 
                         # we combine with rule-based rm
-                        reward_tensor = self.reward_fn(batch)
+                        reward_tensor, corr_list = self.reward_fn(batch, return_corr_list=True) # bsz * seqlen 单条数据每个位置上结果一样的，错误是0正确是1
                         batch.batch['token_level_scores'] = reward_tensor
+                        # r = 0
+                        # w = 0
+                        # for i in range(len(corr_list)):
+                        #     if corr_list[i]:
+                        #         r += 1
+                        #     else:
+                        #         w += 1
+                        #     if (i+1) % 128 == 0:
+                        #         print(f"sample {i // 128}, correct ratio: {r / (r + w)}, wrong ratio: {w / (r + w)}")
+                        #         r = 0
+                        #         w = 0
+
+                        # # 如果在这里prune的话会导致grpo的adv计算有偏差
+                        # batch = self._rm_neg_samples(batch, corr_list, 0.25, 512)
+                        # print("pruned tensor", batch.batch['token_level_scores'].shape)
 
                         # compute rewards. apply_kl_penalty if available
                         if not self.config.actor_rollout_ref.actor.get('use_kl_loss', False):
@@ -1011,6 +1088,11 @@ class RayPPOTrainer(object):
                                                   gamma=self.config.algorithm.gamma,
                                                   lam=self.config.algorithm.lam,
                                                   num_repeat=self.config.actor_rollout_ref.rollout.n)
+                        
+                        # # 在这里prune是为了保证grpo的adv计算正确，跟基线唯一区别应当是每一个真实样本进行学习的次数不同，正例多的学的多，负例多的会学得很少甚至于不学
+                        # corr_list = [not x for x in corr_list] # 这样一来去掉的就是正样本了
+                        # batch = self._rm_neg_samples(batch, corr_list, 0.05, 512)
+                        # print("pruned tensor", batch.batch['token_level_scores'].shape)
 
                     # update critic
                     if self.use_critic:
@@ -1032,6 +1114,7 @@ class RayPPOTrainer(object):
                         (is_last_step or  self.global_steps % self.config.trainer.test_freq == 0):
                         with _timer('testing', timing_raw):
                             val_metrics: dict = self._validate()
+                            pprint(f'Current validation metrics: {val_metrics}')
                             if is_last_step:
                                 last_val_metrics = val_metrics
                         metrics.update(val_metrics)
